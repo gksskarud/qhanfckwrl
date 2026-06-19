@@ -1,384 +1,97 @@
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-  <meta charset="UTF-8" />
-  <title>보물찾기 지도 게임 (Treasure Hunt)</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <!-- Leaflet CSS/JS -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <style>
-    body { font-family: "Pretendard", sans-serif; margin: 0; padding: 0; }
-    #controls { padding: 10px; background: linear-gradient(90deg,#f7fbff,#eef6ff); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    #map { height: 80vh; width: 100%; }
-    input, select, button { margin: 4px; padding: 8px 10px; font-size: 14px; border-radius: 8px; border: 1px solid #ccc; }
-    button { cursor: pointer; background-color: #0078ff; color: white; border: none; }
-    button.secondary { background-color: #666; }
-    .status { margin-left: auto; display:flex; gap:10px; align-items:center; }
-    .info { background: white; padding:6px 10px; border-radius:8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
-    .treasure-found { filter: drop-shadow(0 2px 6px rgba(255,200,0,0.3)); }
-    #hud { position: absolute; right: 12px; top: 92px; z-index: 1000; background: rgba(255,255,255,0.95); padding:8px; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.12); }
-    #leaderboard { max-height: 160px; overflow:auto; }
-    .small { font-size:12px; color:#555; }
-  </style>
-</head>
-<body>
-  <div id="controls">
-    <input type="text" id="keyword" placeholder="검색어 입력 (선택)" />
-    <select id="category">
-      <option value="all">전체</option>
-      <option value="accommodation">호텔</option>
-      <option value="tourism">관광지</option>
-      <option value="cafe">카페</option>
-      <option value="restaurant">음식점</option>
-    </select>
-    <button id="searchBtn">검색</button>
+import sys
 
-    <button id="newGameBtn">🗺️ 새 보물게임 시작</button>
-    <input type="number" id="treasureCount" min="1" max="20" value="5" style="width:70px" />
-    <label class="small">보물 수</label>
-
-    <label class="small">반경(발견 m)</label>
-    <input type="number" id="findRadius" min="20" max="500" value="80" style="width:80px" />
-
-    <div class="status">
-      <div class="info">점수: <span id="score">0</span></div>
-      <div class="info">발견: <span id="foundCount">0</span>/<span id="total">0</span></div>
-      <div class="info small">남은시간: <span id="timer">--:--</span></div>
-    </div>
-  </div>
-
-  <div id="map"></div>
-
-  <div id="hud" style="display:none">
-    <div><strong>최근 액션</strong></div>
-    <div id="lastAction" class="small">게임을 시작하세요.</div>
-    <hr/>
-    <div><strong>로컬 리더보드</strong></div>
-    <div id="leaderboard" class="small"></div>
-    <hr/>
-    <button id="resetProgress" class="secondary">로컬 기록 초기화</button>
-  </div>
-
-  <script>
-    // -------------------------
-    // 설정 및 리소스
-    // -------------------------
-    const icons = {
-      accommodation: L.icon({ iconUrl: "https://cdn-icons-png.flaticon.com/512/139/139899.png", iconSize: [36, 36] }),
-      cafe: L.icon({ iconUrl: "https://cdn-icons-png.flaticon.com/512/2950/2950731.png", iconSize: [36, 36] }),
-      restaurant: L.icon({ iconUrl: "https://cdn-icons-png.flaticon.com/512/1046/1046784.png", iconSize: [36, 36] }),
-      tourism: L.icon({ iconUrl: "https://cdn-icons-png.flaticon.com/512/684/684908.png", iconSize: [36, 36] }),
-      treasure: L.icon({ iconUrl: "https://cdn-icons-png.flaticon.com/512/616/616554.png", iconSize: [40, 40] }),
-      dug: L.icon({ iconUrl: "https://cdn-icons-png.flaticon.com/512/833/833524.png", iconSize: [36,36] }),
-    };
-
-    // -------------------------
-    // 맵 초기화
-    // -------------------------
-    const map = L.map("map").setView([33.389, 126.53], 11);
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19 }).addTo(map);
-
-    // -------------------------
-    // 게임 상태
-    // -------------------------
-    let treasures = []; // {id, latlng: [lat,lng], found:boolean, marker:Marker|null}
-    let markers = []; // 현재 지도에 보이는 마커(발견된 보물 등)
-    let score = 0;
-    let foundCount = 0;
-    let totalTreasures = 0;
-    let gameActive = false;
-    let timerInterval = null;
-    let remainingSeconds = 0;
-
-    // UI 엘리먼트
-    const scoreEl = document.getElementById("score");
-    const foundEl = document.getElementById("foundCount");
-    const totalEl = document.getElementById("total");
-    const lastActionEl = document.getElementById("lastAction");
-    const hud = document.getElementById("hud");
-    const timerEl = document.getElementById("timer");
-
-    // -------------------------
-    // 유틸: 거리 계산 (m)
-    // -------------------------
-    function haversineDistance(lat1, lon1, lat2, lon2) {
-      const R = 6371000; // metres
-      const toRad = (d) => d * Math.PI / 180;
-      const dLat = toRad(lat2 - lat1);
-      const dLon = toRad(lon2 - lon1);
-      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-                Math.sin(dLon/2) * Math.sin(dLon/2);
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      return R * c;
+# 포켓몬 데이터베이스 (예시 데이터)
+pokemon_db = {
+    # 일반 포켓몬 예시 1 (1진화체가 있는 경우)
+    "피카츄": {
+        "is_mega": False,
+        "stats": {"HP": 35, "공격": 55, "방어": 40, "특공": 50, "특방": 50, "스피드": 90},
+        "abilities": ["정전기"],
+        "hidden_ability": "피뢰침",
+        "can_mega_evolve": "불가능",
+        "evolution_line": ["피카츄", "라이츄"]  # 1진화 -> 2진화
+    },
+    "라이츄": {
+        "is_mega": False,
+        "stats": {"HP": 60, "공격": 90, "방어": 55, "특공": 90, "특방": 80, "스피드": 110},
+        "abilities": ["정전기"],
+        "hidden_ability": "피뢰침",
+        "can_mega_evolve": "불가능",
+        "evolution_line": None  # 최종 진화체
+    },
+    # 일반 포켓몬 예시 2 (메가진화가 가능한 최종 진화체)
+    "리자몽": {
+        "is_mega": False,
+        "stats": {"HP": 78, "공격": 84, "방어": 78, "특공": 109, "특방": 85, "스피드": 100},
+        "abilities": ["맹화"],
+        "hidden_ability": "선파워",
+        "can_mega_evolve": "가능 (메가리자몽X, 메가리자몽Y)",
+        "evolution_line": None  # 최종 진화체
+    },
+    # 메가진화 포켓몬 예시 (특성과 추천 성격 표시)
+    "메가리자몽X": {
+        "is_mega": True,
+        "ability": "단단한발톱",
+        "recommended_natures": ["고집 (공격↑ 특공↓)", "명랑 (스피드↑ 특공↓)"]
+    },
+    "메가리자몽Y": {
+        "is_mega": True,
+        "ability": "가뭄",
+        "recommended_natures": ["겁쟁이 (스피드↑ 공격↓)", "조심 (특공↑ 공격↓)"]
     }
+}
 
-    // -------------------------
-    // 게임 로직
-    // -------------------------
-    function startNewGame() {
-      clearAll();
-      const count = parseInt(document.getElementById("treasureCount").value) || 5;
-      const radius = parseInt(document.getElementById("findRadius").value) || 80;
-      // 생성 범위: 현재 지도 뷰의 바운드 내
-      const bounds = map.getBounds();
-      treasures = [];
-      for (let i = 0; i < count; i++) {
-        const lat = Math.random() * (bounds.getNorth() - bounds.getSouth()) + bounds.getSouth();
-        const lng = Math.random() * (bounds.getEast() - bounds.getWest()) + bounds.getWest();
-        treasures.push({ id: i+1, latlng: [lat, lng], found: false, marker: null });
-      }
-      totalTreasures = treasures.length;
-      foundCount = 0;
-      score = 0;
-      gameActive = true;
-      updateHUD();
-      saveProgress();
-      showMessage(`새 게임 시작! 보물 ${totalTreasures}개가 지도에 숨겨졌습니다. 클릭해서 발굴하세요! (반경 ${radius}m 이내 발견)`);
-      hud.style.display = "block";
-      // 타이머 초기화(선택사항) - 예: 10분 기본
-      // remainingSeconds = 0; // 0이면 타이머 비활성화
-      // if (remainingSeconds > 0) startTimer();
-    }
+def search_pokemon():
+    print("====== 🎮 포켓몬 데이터 검색 게임 ======")
+    print("종료하려면 '종료'를 입력하세요.\n")
+    
+    while True:
+        search_name = input("🔍 포켓몬 이름을 입력하세요: ").strip()
+        
+        if search_name == "종료":
+            print("게임 시스템을 종료합니다. 즐거운 모험 되세요!")
+            break
+            
+        if search_name not in pokemon_db:
+            print("❌ 데이터베이스에 없는 포켓몬입니다. (정확한 한글 이름을 입력해주세요.)\n")
+            continue
+            
+        pokemon = pokemon_db[search_name]
+        print("\n" + "="*40)
+        print(f"▶️ 검색 결과: [{search_name}]")
+        print("="*40)
+        
+        # 분기 1: 메가진화 포켓몬인 경우
+        if pokemon["is_mega"]:
+            print(f"✨ 분류: 메가진화 포켓몬")
+            print(f"🧬 메가진화 특성: {pokemon['ability']}")
+            print(f"💊 추천 성격:")
+            for nature in pokemon["recommended_natures"]:
+                print(f"   - {nature}")
+                
+        # 분기 2: 일반 포켓몬인 경우
+        else:
+            print(f"✨ 분류: 일반 포켓몬")
+            # 종족값(개체값 베이스) 출력
+            print(f"📊 종족값:")
+            for stat_name, value in pokemon["stats"].items():
+                print(f"   - {stat_name}: {value}")
+            
+            # 특성 및 숨겨진 특성
+            print(f"🧬 일반 특성: {', '.join(pokemon['abilities'])}")
+            print(f"👁️ 숨겨진 특성: {pokemon['hidden_ability']}")
+            
+            # 메가진화 여부
+            print(f"💎 메가진화 여부: {pokemon['can_mega_evolve']}")
+            
+            # 진화 트리 출력 (진화체가 아닐 경우 1진화 -> 2진화)
+            if pokemon["evolution_line"]:
+                print(f"📈 진화 과정: {' ➡️ '.join(pokemon['evolution_line'])}")
+            else:
+                print(f"📈 진화 과정: 이미 최종 진화체이거나 진화가 없는 포켓몬입니다.")
+                
+        print("="*40 + "\n")
 
-    function clearAll() {
-      // 마커 및 상태 초기화
-      markers.forEach(m => map.removeLayer(m));
-      markers = [];
-      treasures = [];
-      clearInterval(timerInterval);
-      timerInterval = null;
-      remainingSeconds = 0;
-      timerEl.textContent = "--:--";
-      gameActive = false;
-      updateHUD();
-    }
-
-    function saveProgress() {
-      const payload = { treasures, score, foundCount, totalTreasures, timestamp: Date.now() };
-      localStorage.setItem("treasureGameProgress", JSON.stringify(payload));
-    }
-
-    function loadProgress() {
-      const raw = localStorage.getItem("treasureGameProgress");
-      if (!raw) return false;
-      try {
-        const obj = JSON.parse(raw);
-        treasures = obj.treasures || [];
-        // 마커는 그리지 않음(발견된것들만 그리기)
-        score = obj.score || 0;
-        foundCount = obj.foundCount || 0;
-        totalTreasures = obj.totalTreasures || treasures.length;
-        gameActive = true;
-        updateHUD();
-        // render already-found
-        treasures.forEach(t => {
-          if (t.found) {
-            const m = L.marker(t.latlng, { icon: icons.treasure }).addTo(map);
-            m.bindPopup(`<b>발견된 보물 #${t.id}</b>`).openPopup();
-            markers.push(m);
-          }
-        });
-        showMessage("이전 진행을 불러왔습니다. 계속 플레이하세요.");
-        hud.style.display = "block";
-        return true;
-      } catch (e) {
-        console.error(e);
-        return false;
-      }
-    }
-
-    function showMessage(msg) {
-      lastActionEl.textContent = msg;
-    }
-
-    // -------------------------
-    // 맵 클릭(발굴) 핸들러
-    // -------------------------
-    map.on('click', (e) => {
-      if (!gameActive) {
-        showMessage("게임을 먼저 시작하세요: '새 보물게임 시작' 버튼을 클릭하세요.");
-        return;
-      }
-      const clickLat = e.latlng.lat;
-      const clickLng = e.latlng.lng;
-      const radius = parseInt(document.getElementById("findRadius").value) || 80;
-
-      // 가장 가까운 보물 찾기
-      let nearest = null;
-      let nearestDist = Infinity;
-      treasures.forEach(t => {
-        if (t.found) return;
-        const d = haversineDistance(clickLat, clickLng, t.latlng[0], t.latlng[1]);
-        if (d < nearestDist) {
-          nearestDist = d;
-          nearest = t;
-        }
-      });
-
-      if (!nearest) {
-        showMessage("모든 보물을 이미 찾았습니다! 새 게임을 시작해보세요.");
-        return;
-      }
-
-      // 시각적 피드백: 클릭 위치에 작은 마커
-      const dug = L.marker([clickLat, clickLng], { icon: icons.dug }).addTo(map);
-      markers.push(dug);
-      setTimeout(() => { if (map.hasLayer(dug)) map.removeLayer(dug); }, 4000);
-
-      // 거리 안내
-      const distRounded = Math.round(nearestDist);
-      let hint = "";
-      if (nearestDist <= radius) {
-        // 발견
-        nearest.found = true;
-        foundCount += 1;
-        score += Math.max(10, Math.round((radius - nearestDist) + 50)); // 보너스 점수
-        const tmarker = L.marker(nearest.latlng, { icon: icons.treasure }).addTo(map);
-        tmarker.bindPopup(`<b>보물 #${nearest.id} 발견!</b><br>거리: ${distRounded} m`).openPopup();
-        nearest.marker = tmarker;
-        markers.push(tmarker);
-        showMessage(`🎉 보물 #${nearest.id} 발견! 거리 ${distRounded}m — 점수 +${Math.max(10, Math.round((radius - nearestDist) + 50))}`);
-        updateHUD();
-        saveProgress();
-
-        if (foundCount >= totalTreasures) {
-          gameOver();
-        }
-      } else {
-        // 힌트: 따뜻/미지근/차가움
-        if (nearestDist <= radius * 2) hint = "따뜻해요 🔥 (근처에 보물이 있어요)";
-        else if (nearestDist <= radius * 4) hint = "미지근해요 🙂";
-        else hint = "차가워요 ❄️ (멀어요)";
-        showMessage(`발굴 실패. 가장 가까운 보물까지 약 ${distRounded}m — 힌트: ${hint}`);
-      }
-      updateHUD();
-    });
-
-    function updateHUD() {
-      scoreEl.textContent = score;
-      foundEl.textContent = foundCount;
-      totalEl.textContent = totalTreasures;
-      // leaderboard 업데이트
-      renderLeaderboard();
-    }
-
-    function gameOver() {
-      showMessage(`모든 보물을 찾았습니다! 최종 점수: ${score}점`);
-      gameActive = false;
-      saveScoreToLeaderboard(score);
-      saveProgress(); // 상태 저장
-    }
-
-    // -------------------------
-    // 리더보드 (로컬)
-    // -------------------------
-    function saveScoreToLeaderboard(sc) {
-      const lbRaw = localStorage.getItem("treasureLeaderboard") || "[]";
-      const lb = JSON.parse(lbRaw);
-      const entry = { score: sc, date: new Date().toISOString() };
-      lb.push(entry);
-      lb.sort((a,b) => b.score - a.score);
-      if (lb.length > 10) lb.splice(10);
-      localStorage.setItem("treasureLeaderboard", JSON.stringify(lb));
-      renderLeaderboard();
-    }
-
-    function renderLeaderboard() {
-      const lbRaw = localStorage.getItem("treasureLeaderboard") || "[]";
-      const lb = JSON.parse(lbRaw);
-      const el = document.getElementById("leaderboard");
-      el.innerHTML = "";
-      if (lb.length === 0) { el.textContent = "기록 없음"; return; }
-      lb.forEach((r, idx) => {
-        const d = new Date(r.date);
-        const div = document.createElement("div");
-        div.textContent = `${idx+1}. ${r.score} 점 — ${d.toLocaleString()}`;
-        el.appendChild(div);
-      });
-    }
-
-    // -------------------------
-    // 타이머 기능 (선택)
-    // -------------------------
-    function startTimer(seconds) {
-      clearInterval(timerInterval);
-      remainingSeconds = seconds;
-      updateTimerDisplay();
-      timerInterval = setInterval(() => {
-        remainingSeconds--;
-        if (remainingSeconds <= 0) {
-          clearInterval(timerInterval);
-          showMessage("시간 종료! 게임이 끝났습니다.");
-          gameActive = false;
-          saveScoreToLeaderboard(score);
-          saveProgress();
-          timerEl.textContent = "00:00";
-        } else {
-          updateTimerDisplay();
-        }
-      }, 1000);
-    }
-
-    function updateTimerDisplay() {
-      const mm = String(Math.floor(remainingSeconds/60)).padStart(2,'0');
-      const ss = String(remainingSeconds%60).padStart(2,'0');
-      timerEl.textContent = `${mm}:${ss}`;
-    }
-
-    // -------------------------
-    // 이벤트: 버튼들
-    // -------------------------
-    document.getElementById("newGameBtn").addEventListener("click", () => {
-      startNewGame();
-    });
-
-    document.getElementById("searchBtn").addEventListener("click", () => {
-      // 기존 검색 UI와 호환되게 간단한 위치검색(로컬기능만 제공)
-      const kw = document.getElementById("keyword").value.trim();
-      if (!kw) { alert("검색어를 입력하세요."); return; }
-      // 간단 방법: 브라우저의 Nominatim 등을 호출하려면 CORS/정책이 필요. 
-      // 여기서는 사용자가 직접 위치를 클릭해 탐색하도록 유도.
-      alert("검색 기능은 향후 Geo API 키를 연결해 확장할 수 있습니다. 현재는 지도를 클릭하여 발굴하세요.");
-    });
-
-    document.getElementById("resetProgress").addEventListener("click", () => {
-      if (!confirm("로컬 저장된 게임 진행/리더보드를 초기화할까요?")) return;
-      localStorage.removeItem("treasureGameProgress");
-      localStorage.removeItem("treasureLeaderboard");
-      location.reload();
-    });
-
-    // -------------------------
-    // 로드 시 이전 진행 불러오기
-    // -------------------------
-    window.addEventListener("load", () => {
-      const resumed = loadProgress();
-      if (!resumed) {
-        // 안내 메시지
-        showMessage("보물찾기 게임에 오신 걸 환영합니다! '새 보물게임 시작'을 눌러 시작하세요.");
-      }
-      renderLeaderboard();
-    });
-
-    // -------------------------
-    // GitHub 배포/README 안내 (주석으로 제공)
-    // -------------------------
-    /* 
-      사용법 (간단):
-      1) 파일을 index.html로 저장.
-      2) GitHub 저장소를 만든 뒤, index.html을 루트에 푸시.
-      3) 저장소 Settings > Pages에서 main branch / root (/) 선택하여 GitHub Pages 활성화.
-      4) 페이지가 배포되면 URL에서 게임 플레이 가능.
-
-      확장 아이디어:
-      - Geoapify / Nominatim API를 연결해 보물 위치를 실제 장소(POI)에 매핑.
-      - 보물 종류(아이템) 추가 + 아이템별 점수 가중치.
-      - 친구와 동일한 맵에서 경쟁할 수 있도록 서버 기반 리더보드 추가.
-      - 모바일 터치 최적화(큰 버튼, 제스처).
-    */
-
-  </script>
-</body>
-</html>
+# 게임 실행
+if __name__ == "__main__":
+    search_pokemon()
